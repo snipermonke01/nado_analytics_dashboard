@@ -1,4 +1,4 @@
-# NLP Protocol Dashboard
+# Nado Protocol Dashboard
 
 A Streamlit-based analytics dashboard providing real‑time metrics,
 charts, and KPIs for the NLP Protocol.
