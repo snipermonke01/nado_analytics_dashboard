@@ -97,7 +97,7 @@ fig_vol = px.bar(
     color="asset",
     category_orders={"asset": vol_order},
     barmode="stack",
-    title="Daily Volume by Asset (stacked) + Total Cumulative Volume",
+    title="Daily Volume by Asset",
 )
 
 # Ensure trace order follows our desired stacking order (bottom = largest)
@@ -109,7 +109,7 @@ fig_vol.add_trace(
     go.Scatter(
         x=df.index,
         y=df["sum_cumulative_volumes"],
-        name="Total Cumulative Volume",
+        name="Cumulative Volume",
         mode="lines",
         yaxis="y2",
     )
@@ -117,7 +117,7 @@ fig_vol.add_trace(
 
 fig_vol.update_layout(
     yaxis=dict(title="Daily Volume"),
-    yaxis2=dict(title=dict(text="Total Cumulative Volume", standoff=10), overlaying="y", side="right"),
+    yaxis2=dict(title=dict(text="Cumulative Volume", standoff=10), overlaying="y", side="right"),
     legend_title_text="Asset",
 )
 _apply_legend_offset(fig_vol)
@@ -132,7 +132,7 @@ fig_trades = px.bar(
     color="asset",
     category_orders={"asset": trades_order},
     barmode="stack",
-    title="Daily Trades by Asset (stacked) + Total Cumulative Trades",
+    title="Daily Trades by Asset",
 )
 
 if trades_order:
@@ -151,7 +151,7 @@ fig_trades.add_trace(
 
 fig_trades.update_layout(
     yaxis=dict(title="Daily Trades"),
-    yaxis2=dict(title=dict(text="Total Cumulative Trades", standoff=10), overlaying="y", side="right"),
+    yaxis2=dict(title=dict(text="Cumulative Trades", standoff=10), overlaying="y", side="right"),
     legend_title_text="Asset",
 )
 _apply_legend_offset(fig_trades)
@@ -166,7 +166,7 @@ fig_oi = px.bar(
     color="asset",
     category_orders={"asset": oi_order},
     barmode="stack",
-    title="Open Interest by Asset (stacked)",
+    title="Open Interest by Asset",
 )
 
 if oi_order:
@@ -204,7 +204,7 @@ fig_users.add_trace(go.Bar(x=df.index, y=df["daily_active_users"], name="Daily A
 fig_users.add_trace(go.Scatter(x=df.index, y=df["cumulative_users"],
                     name="Cumulative Users", mode="lines", yaxis="y2"))
 fig_users.update_layout(
-    title="Daily Active Users (bar) + Cumulative Users (line)",
+    title="Daily Active Users",
     yaxis=dict(title="Daily Active Users"),
     yaxis2=dict(title=dict(text="Cumulative Users", standoff=10), overlaying="y", side="right"),
 )
