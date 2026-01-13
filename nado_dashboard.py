@@ -6,19 +6,18 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 
-
 from get_metrics import get_stats
 
 st.set_page_config(layout="wide")
-
 st.title("Nado Analytics Dashboard")
 
 # Load Data
 df, assets = get_stats(return_assets=True)
-
-# KPI Row
 latest = df.iloc[-1]
 
+# -----------------------------
+# KPI Row
+# -----------------------------
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
 with kpi1:
@@ -37,20 +36,22 @@ with kpi5:
     with st.container(border=True):
         st.metric("Current Open Interest", f"${latest['sum_open_interests']:,.0f}")
 
-# --- Helper: wide (date x asset) -> long (date, asset, value) for stacked bars ---
-
+# -----------------------------
+# Helpers
+# -----------------------------
+MONEY_HOVER = "%{x|%Y-%m-%d}<br>$%{y:,.2f}<extra>%{fullData.name}</extra>"
+PLAIN_HOVER = "%{x|%Y-%m-%d}<br>%{y:,.2f}<extra>%{fullData.name}</extra>"
 
 def _to_long(wide: pd.DataFrame, value_name: str) -> pd.DataFrame:
+    """date-indexed wide (date x asset) -> long (date, asset, value)"""
     if wide is None or wide.empty:
         return pd.DataFrame(columns=["date", "asset", value_name])
     tmp = wide.copy()
     tmp.index.name = "date"
-    long = tmp.reset_index().melt(id_vars=["date"], var_name="asset", value_name=value_name)
-    return long
-
+    return tmp.reset_index().melt(id_vars=["date"], var_name="asset", value_name=value_name)
 
 def _asset_order(long_df: pd.DataFrame, value_col: str) -> list[str]:
-    """Order assets by total value (descending) so the largest stacks sit at the bottom."""
+    """Largest total at bottom of stack."""
     if long_df is None or long_df.empty:
         return []
     return (
@@ -61,184 +62,254 @@ def _asset_order(long_df: pd.DataFrame, value_col: str) -> list[str]:
         .tolist()
     )
 
+def _sort_stack_traces(fig: go.Figure, order: list[str]) -> None:
+    """Make stack order match asset order (largest first = bottom)."""
+    if not order:
+        return
+    fig.data = tuple(sorted(fig.data, key=lambda t: order.index(t.name) if t.name in order else 10**9))
 
-def _apply_legend_offset(fig: go.Figure, right_margin: int = 140) -> None:
-    """Move the legend slightly right so it doesn't collide with the secondary y-axis labels."""
+def _legend_right(fig: go.Figure, right_margin: int = 140) -> None:
     fig.update_layout(
         legend=dict(x=1.02, y=1, xanchor="left", yanchor="top"),
         margin=dict(r=right_margin),
     )
 
+def _per_point_hover(fig: go.Figure) -> None:
+    """Hover only for the point/bar under cursor (not unified x)."""
+    fig.update_layout(hovermode="closest")
+
+def _money_axes(fig: go.Figure, y1_title: str, y2_title: str | None = None) -> None:
+    fig.update_yaxes(title_text=y1_title, tickprefix="$", tickformat=",.2f")
+    if y2_title is not None:
+        fig.update_layout(
+            yaxis2=dict(
+                title=dict(text=y2_title, standoff=10),
+                tickprefix="$",
+                tickformat=",.2f",
+                overlaying="y",
+                side="right",
+            )
+        )
+
+def _plain_axes(fig: go.Figure, y1_title: str, y2_title: str | None = None) -> None:
+    fig.update_yaxes(title_text=y1_title, tickformat=",.2f")
+    if y2_title is not None:
+        fig.update_layout(
+            yaxis2=dict(
+                title=dict(text=y2_title, standoff=10),
+                tickformat=",.2f",
+                overlaying="y",
+                side="right",
+            )
+        )
+
+def _set_hover(fig: go.Figure, money: bool) -> None:
+    fig.update_traces(hovertemplate=(MONEY_HOVER if money else PLAIN_HOVER))
 
 def _nov20_start(index: pd.Index) -> pd.Timestamp | None:
-    """Find the first Nov-20 date in the index; fall back to Nov-20 of the min year (or next)"""
+    """Find first Nov-20 in index; else pick Nov-20 of min year (or next)."""
     if not isinstance(index, pd.DatetimeIndex) or len(index) == 0:
         return None
-    # try exact month/day match in the data
     mask = (index.month == 11) & (index.day == 20)
     if mask.any():
         return pd.Timestamp(index[mask][0]).normalize()
-    # fallback: Nov 20 of the first year, otherwise the next year
     y0 = index.min().year
     candidate = pd.Timestamp(year=y0, month=11, day=20)
     if candidate < index.min():
         candidate = pd.Timestamp(year=y0 + 1, month=11, day=20)
     return candidate
 
+# -----------------------------
+# Figure builders
+# -----------------------------
+def build_volume(df: pd.DataFrame, assets: dict) -> go.Figure:
+    long = _to_long(assets.get("daily_volume"), "daily_volume")
+    order = _asset_order(long, "daily_volume")
 
-# 1. Volume: stacked daily bars by asset + cumulative total line
-daily_vol_long = _to_long(assets.get("daily_volume"), "daily_volume")
-vol_order = _asset_order(daily_vol_long, "daily_volume")
-
-fig_vol = px.bar(
-    daily_vol_long,
-    x="date",
-    y="daily_volume",
-    color="asset",
-    category_orders={"asset": vol_order},
-    barmode="stack",
-    title="Daily Volume by Asset",
-)
-
-# Ensure trace order follows our desired stacking order (bottom = largest)
-if vol_order:
-    fig_vol.data = tuple(sorted(fig_vol.data, key=lambda t: vol_order.index(t.name)
-                         if t.name in vol_order else 10**9))
-
-fig_vol.add_trace(
-    go.Scatter(
-        x=df.index,
-        y=df["sum_cumulative_volumes"],
-        name="Cumulative Volume",
-        mode="lines",
-        yaxis="y2",
+    fig = px.bar(
+        long,
+        x="date",
+        y="daily_volume",
+        color="asset",
+        category_orders={"asset": order},
+        barmode="stack",
+        title="Daily Volume by Asset",
     )
-)
+    _sort_stack_traces(fig, order)
 
-fig_vol.update_layout(
-    yaxis=dict(title="Daily Volume"),
-    yaxis2=dict(title=dict(text="Cumulative Volume", standoff=10), overlaying="y", side="right"),
-    legend_title_text="Asset",
-)
-_apply_legend_offset(fig_vol)
-# 2. Trades: stacked daily bars by asset + cumulative total line
-daily_trades_long = _to_long(assets.get("daily_trades"), "daily_trades")
-trades_order = _asset_order(daily_trades_long, "daily_trades")
-
-fig_trades = px.bar(
-    daily_trades_long,
-    x="date",
-    y="daily_trades",
-    color="asset",
-    category_orders={"asset": trades_order},
-    barmode="stack",
-    title="Daily Trades by Asset",
-)
-
-if trades_order:
-    fig_trades.data = tuple(sorted(fig_trades.data, key=lambda t: trades_order.index(
-        t.name) if t.name in trades_order else 10**9))
-
-fig_trades.add_trace(
-    go.Scatter(
-        x=df.index,
-        y=df["sum_cumulative_trades"],
-        name="Total Cumulative Trades",
-        mode="lines",
-        yaxis="y2",
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["sum_cumulative_volumes"],
+            name="Cumulative Volume",
+            mode="lines",
+            yaxis="y2",
+            hovertemplate=MONEY_HOVER,
+        )
     )
-)
 
-fig_trades.update_layout(
-    yaxis=dict(title="Daily Trades"),
-    yaxis2=dict(title=dict(text="Cumulative Trades", standoff=10), overlaying="y", side="right"),
-    legend_title_text="Asset",
-)
-_apply_legend_offset(fig_trades)
-# 3. Open Interest: stacked bars by asset (current OI distribution over time)
-oi_long = _to_long(assets.get("open_interest"), "open_interest")
-oi_order = _asset_order(oi_long, "open_interest")
+    _per_point_hover(fig)
+    _money_axes(fig, y1_title="Daily Volume", y2_title="Cumulative Volume")
+    _set_hover(fig, money=True)
+    fig.update_layout(legend_title_text="Asset")
+    _legend_right(fig)
+    return fig
 
-fig_oi = px.bar(
-    oi_long,
-    x="date",
-    y="open_interest",
-    color="asset",
-    category_orders={"asset": oi_order},
-    barmode="stack",
-    title="Open Interest by Asset",
-)
+def build_trades(df: pd.DataFrame, assets: dict) -> go.Figure:
+    long = _to_long(assets.get("daily_trades"), "daily_trades")
+    order = _asset_order(long, "daily_trades")
 
-if oi_order:
-    fig_oi.data = tuple(sorted(fig_oi.data, key=lambda t: oi_order.index(t.name)
-                        if t.name in oi_order else 10**9))
-
-fig_oi.update_layout(yaxis=dict(title="Open Interest"), legend_title_text="Asset")
-_apply_legend_offset(fig_oi)
-# 4. NLP TVL (bar) + NLP Price (line; starts Nov 20)
-price_start = _nov20_start(df.index)
-price_mask = (df.index >= price_start) if price_start is not None else pd.Series(
-    [True] * len(df), index=df.index)
-
-fig_nlp = go.Figure()
-fig_nlp.add_trace(go.Bar(x=df.index, y=df["NLP TVL"], name="NLP TVL", opacity=0.7))
-fig_nlp.add_trace(
-    go.Scatter(
-        x=df.index[price_mask],
-        y=df.loc[price_mask, "NLP Price"],
-        name="NLP Price",
-        mode="lines",
-        yaxis="y2",
+    fig = px.bar(
+        long,
+        x="date",
+        y="daily_trades",
+        color="asset",
+        category_orders={"asset": order},
+        barmode="stack",
+        title="Daily Trades by Asset",
     )
-)
-fig_nlp.update_layout(
-    title="NLP TVL (bar) + NLP Price (line)",
-    yaxis=dict(title="NLP TVL"),
-    yaxis2=dict(title=dict(text="NLP Price", standoff=10), overlaying="y", side="right"),
-)
-_apply_legend_offset(fig_nlp)
+    _sort_stack_traces(fig, order)
 
-# 5. Users (bar) + Cumulative Users (line)
-fig_users = go.Figure()
-fig_users.add_trace(go.Bar(x=df.index, y=df["daily_active_users"], name="Daily Active Users", opacity=0.7))
-fig_users.add_trace(go.Scatter(x=df.index, y=df["cumulative_users"],
-                    name="Cumulative Users", mode="lines", yaxis="y2"))
-fig_users.update_layout(
-    title="Daily Active Users",
-    yaxis=dict(title="Daily Active Users"),
-    yaxis2=dict(title=dict(text="Cumulative Users", standoff=10), overlaying="y", side="right"),
-)
-_apply_legend_offset(fig_users)
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["sum_cumulative_trades"],
+            name="Total Cumulative Trades",
+            mode="lines",
+            yaxis="y2",
+            hovertemplate=PLAIN_HOVER,
+        )
+    )
 
-# 6. TVL (line)
-fig_tvl = px.line(df, x=df.index, y="tvl", title="Protocol TVL")
-_apply_legend_offset(fig_tvl, right_margin=120)
+    _per_point_hover(fig)
+    _plain_axes(fig, y1_title="Daily Trades", y2_title="Cumulative Trades")
+    _set_hover(fig, money=False)
+    fig.update_layout(legend_title_text="Asset")
+    _legend_right(fig)
+    return fig
 
-# Build rows for plots
-c1, c2, c3 = st.columns(3)
+def build_open_interest(df: pd.DataFrame, assets: dict) -> go.Figure:
+    long = _to_long(assets.get("open_interest"), "open_interest")
+    order = _asset_order(long, "open_interest")
 
+    fig = px.bar(
+        long,
+        x="date",
+        y="open_interest",
+        color="asset",
+        category_orders={"asset": order},
+        barmode="stack",
+        title="Open Interest by Asset",
+    )
+    _sort_stack_traces(fig, order)
+
+    _per_point_hover(fig)
+    _money_axes(fig, y1_title="Open Interest")
+    _set_hover(fig, money=True)
+    fig.update_layout(legend_title_text="Asset")
+    _legend_right(fig)
+    return fig
+
+def build_nlp(df: pd.DataFrame) -> go.Figure:
+    price_start = _nov20_start(df.index)
+    price_mask = (df.index >= price_start) if price_start is not None else pd.Series([True] * len(df), index=df.index)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=df.index,
+            y=df["NLP TVL"],
+            name="NLP TVL",
+            opacity=0.7,
+            hovertemplate=MONEY_HOVER,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df.index[price_mask],
+            y=df.loc[price_mask, "NLP Price"],
+            name="NLP Price",
+            mode="lines",
+            yaxis="y2",
+            hovertemplate=MONEY_HOVER,
+        )
+    )
+
+    fig.update_layout(title="NLP TVL (bar) + NLP Price (line)")
+    _per_point_hover(fig)
+    _money_axes(fig, y1_title="NLP TVL", y2_title="NLP Price")
+    _legend_right(fig)
+    return fig
+
+def build_users(df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=df.index,
+            y=df["daily_active_users"],
+            name="Daily Active Users",
+            opacity=0.7,
+            hovertemplate=PLAIN_HOVER,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["cumulative_users"],
+            name="Cumulative Users",
+            mode="lines",
+            yaxis="y2",
+            hovertemplate=PLAIN_HOVER,
+        )
+    )
+
+    fig.update_layout(title="Daily Active Users")
+    _per_point_hover(fig)
+    _plain_axes(fig, y1_title="Daily Active Users", y2_title="Cumulative Users")
+    _legend_right(fig)
+    return fig
+
+def build_tvl(df: pd.DataFrame) -> go.Figure:
+    fig = px.line(df, x=df.index, y="tvl", title="Protocol TVL")
+    _per_point_hover(fig)
+    _money_axes(fig, y1_title="TVL")
+    _set_hover(fig, money=True)
+    _legend_right(fig, right_margin=120)
+    return fig
+
+# -----------------------------
+# Build figures
+# -----------------------------
+fig_vol = build_volume(df, assets)
+fig_trades = build_trades(df, assets)
+fig_oi = build_open_interest(df, assets)
+fig_nlp = build_nlp(df)
+fig_users = build_users(df)
+fig_tvl = build_tvl(df)
+
+# -----------------------------
+# Layout: 2 columns of plots
+# -----------------------------
+c1, c2 = st.columns(2)
 with c1:
     with st.container(border=True):
         st.plotly_chart(fig_vol, use_container_width=True)
-
 with c2:
-    with st.container(border=True):
-        st.plotly_chart(fig_trades, use_container_width=True)
-
-with c3:
     with st.container(border=True):
         st.plotly_chart(fig_oi, use_container_width=True)
 
-c4, c5, c6 = st.columns(3)
-
-with c4:
+c3, c4 = st.columns(2)
+with c3:
     with st.container(border=True):
         st.plotly_chart(fig_nlp, use_container_width=True)
-
-with c5:
-    with st.container(border=True):
-        st.plotly_chart(fig_users, use_container_width=True)
-
-with c6:
+with c4:
     with st.container(border=True):
         st.plotly_chart(fig_tvl, use_container_width=True)
+
+c5, c6 = st.columns(2)
+with c5:
+    with st.container(border=True):
+        st.plotly_chart(fig_trades, use_container_width=True)
+with c6:
+    with st.container(border=True):
+        st.plotly_chart(fig_users, use_container_width=True)
