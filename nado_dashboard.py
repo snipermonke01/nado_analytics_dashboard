@@ -5,6 +5,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
+import numpy as np
 
 from get_metrics import get_stats
 
@@ -41,6 +42,159 @@ with kpi5:
 # -----------------------------
 MONEY_HOVER = "%{x|%Y-%m-%d}<br>$%{y:,.2f}<extra>%{fullData.name}</extra>"
 PLAIN_HOVER = "%{x|%Y-%m-%d}<br>%{y:,.2f}<extra>%{fullData.name}</extra>"
+
+def _axis_scale_from_max(max_abs: float) -> tuple[float, str]:
+    """Return (divisor, suffix) based on the axis max magnitude."""
+    if max_abs >= 1_000_000_000:
+        return 1_000_000_000.0, "b"
+    if max_abs >= 1_000_000:
+        return 1_000_000.0, "m"
+    if max_abs >= 1_000:
+        return 1_000.0, "k"
+    return 1.0, ""
+
+def _fmt_scaled(v: float, divisor: float, suffix: str) -> str:
+    """Format value using a fixed divisor/suffix for the whole axis."""
+    if v is None:
+        return ""
+    try:
+        if isinstance(v, float) and np.isnan(v):
+            return ""
+    except Exception:
+        pass
+
+    # Special-case 0 so it stays "0" (not "0k/0m/0b")
+    if v == 0:
+        return "0"
+
+    if divisor == 1.0:
+        return f"{v:,.0f}"
+
+    scaled = v / divisor
+    av = abs(scaled)
+
+    if av >= 100:
+        s = f"{scaled:,.0f}"
+    elif av >= 10:
+        s = f"{scaled:,.0f}"
+    else:
+        s = f"{scaled:,.1f}".rstrip("0").rstrip(".")
+
+    return f"{s}{suffix}"
+
+def _nice_step(span: float, nticks: int) -> float:
+    """Nice step size (1/2/5 * 10^n)."""
+    if span <= 0 or nticks < 2:
+        return 1.0
+    raw = span / (nticks - 1)
+    mag = 10 ** np.floor(np.log10(raw))
+    norm = raw / mag
+    if norm <= 1:
+        nice = 1
+    elif norm <= 2:
+        nice = 2
+    elif norm <= 5:
+        nice = 5
+    else:
+        nice = 10
+    return nice * mag
+
+def _compute_nice_ticks(vmin: float, vmax: float, nticks: int = 6) -> list[float]:
+    """Generate nice tick values that cover [vmin, vmax]."""
+    if vmin == vmax:
+        return [vmin]
+    span = vmax - vmin
+    step = _nice_step(span, nticks)
+    start = np.floor(vmin / step) * step
+    end = np.ceil(vmax / step) * step
+    ticks = np.arange(start, end + step * 0.5, step)
+    return ticks.tolist()
+
+def _stack_totals_for_axis(fig: go.Figure, axis_name: str) -> tuple[list[float], list[float]]:
+    """
+    For stacked bars, Plotly’s axis range depends on the SUM of bar traces at each x.
+    Return (stack_sums, all_bar_values) for traces on the given axis.
+    """
+    bar_traces = [
+        tr for tr in fig.data
+        if getattr(tr, "type", None) == "bar"
+        and getattr(tr, "yaxis", "y") == axis_name
+        and getattr(tr, "y", None) is not None
+    ]
+    if not bar_traces:
+        return [], []
+
+    # Use the first bar trace's x as the index; px.bar aligns traces by x position.
+    x0 = list(bar_traces[0].x) if getattr(bar_traces[0], "x", None) is not None else list(range(len(bar_traces[0].y)))
+    sums = {x: 0.0 for x in x0}
+
+    all_vals = []
+    for tr in bar_traces:
+        xs = list(tr.x) if getattr(tr, "x", None) is not None else x0
+        ys = list(pd.Series(tr.y).fillna(0).astype(float).values)
+        for x, y in zip(xs, ys):
+            sums[x] = sums.get(x, 0.0) + y
+        all_vals.extend(ys)
+
+    return list(sums.values()), all_vals
+
+def _apply_kmb_ticks(fig: go.Figure, which: str = "y", prefix: str = "", nticks: int = 6) -> None:
+    """
+    Apply k/m/b tick labels to an axis using ONE unit chosen from the AXIS MAX TICK.
+    Also correctly handles STACKED bars by using per-x summed totals.
+    """
+    axis_name = "y" if which == "y" else "y2"
+
+    vals = []
+
+    # 1) If there are bars, include STACK totals (this is what drives the axis max in stacked charts)
+    stack_sums, bar_vals = _stack_totals_for_axis(fig, axis_name)
+    vals.extend(stack_sums)          # important for max
+    vals.extend(bar_vals)            # keep for min (if negatives ever exist)
+
+    # 2) Include non-bar traces (lines, scatter, etc.) on this axis
+    for tr in fig.data:
+        tr_axis = getattr(tr, "yaxis", "y")
+        if tr_axis != axis_name:
+            continue
+        if getattr(tr, "type", None) == "bar":
+            continue
+        if getattr(tr, "y", None) is None:
+            continue
+        try:
+            vals.extend(list(pd.Series(tr.y).dropna().astype(float).values))
+        except Exception:
+            pass
+
+    if not vals:
+        return
+
+    vmin = float(np.min(vals))
+    vmax = float(np.max(vals))
+
+    # include 0 for nicer axes
+    vmin = min(vmin, 0.0)
+    vmax = max(vmax, 0.0)
+
+    # Build nice ticks FIRST, then choose scale based on the TOP tick
+    tickvals = _compute_nice_ticks(vmin, vmax, nticks=nticks)
+    top_tick = max(abs(tickvals[0]), abs(tickvals[-1]))
+    divisor, suffix = _axis_scale_from_max(top_tick)
+
+    ticktext = [f"{prefix}{_fmt_scaled(v, divisor, suffix)}" for v in tickvals]
+
+    if which == "y":
+        fig.update_yaxes(tickmode="array", tickvals=tickvals, ticktext=ticktext)
+    else:
+        fig.update_layout(
+            yaxis2=dict(
+                **(fig.layout.yaxis2.to_plotly_json() if fig.layout.yaxis2 else {}),
+                tickmode="array",
+                tickvals=tickvals,
+                ticktext=ticktext,
+            )
+        )
+
 
 def _to_long(wide: pd.DataFrame, value_name: str) -> pd.DataFrame:
     """date-indexed wide (date x asset) -> long (date, asset, value)"""
@@ -79,29 +233,32 @@ def _per_point_hover(fig: go.Figure) -> None:
     fig.update_layout(hovermode="closest")
 
 def _money_axes(fig: go.Figure, y1_title: str, y2_title: str | None = None) -> None:
-    fig.update_yaxes(title_text=y1_title, tickprefix="$", tickformat=",.2f")
+    fig.update_yaxes(title_text=y1_title, tickprefix="$")
+    _apply_kmb_ticks(fig, which="y", prefix="$")
+
     if y2_title is not None:
         fig.update_layout(
             yaxis2=dict(
                 title=dict(text=y2_title, standoff=10),
-                tickprefix="$",
-                tickformat=",.2f",
                 overlaying="y",
                 side="right",
             )
         )
+        _apply_kmb_ticks(fig, which="y2", prefix="$")
 
 def _plain_axes(fig: go.Figure, y1_title: str, y2_title: str | None = None) -> None:
-    fig.update_yaxes(title_text=y1_title, tickformat=",.2f")
+    fig.update_yaxes(title_text=y1_title)
+    _apply_kmb_ticks(fig, which="y", prefix="")
+
     if y2_title is not None:
         fig.update_layout(
             yaxis2=dict(
                 title=dict(text=y2_title, standoff=10),
-                tickformat=",.2f",
                 overlaying="y",
                 side="right",
             )
         )
+        _apply_kmb_ticks(fig, which="y2", prefix="")
 
 def _set_hover(fig: go.Figure, money: bool) -> None:
     fig.update_traces(hovertemplate=(MONEY_HOVER if money else PLAIN_HOVER))
